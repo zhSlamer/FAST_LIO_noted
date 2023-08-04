@@ -143,6 +143,7 @@ void SigHandle(int sig)
 {
     flg_exit = true;
     ROS_WARN("catch sig %d", sig);
+     //  会唤醒所有等待队列中阻塞的线程 线程被唤醒后，会通过轮询方式获得锁，获得锁前也一直处理运行状态，不会被再次阻塞。
     sig_buffer.notify_all();
 }
 
@@ -285,12 +286,13 @@ void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
         ROS_ERROR("lidar loop back, clear buffer");
         lidar_buffer.clear();
     }
+    last_timestamp_lidar = msg->header.stamp.toSec();
 
+    // 局部对象指针在容器中存储下来
     PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
     p_pre->process(msg, ptr);
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(msg->header.stamp.toSec());
-    last_timestamp_lidar = msg->header.stamp.toSec();
     s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
     mtx_buffer.unlock();
     sig_buffer.notify_all();
@@ -310,11 +312,12 @@ void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg)
     }
     last_timestamp_lidar = msg->header.stamp.toSec();
     
+    // 如果不需要进行时间同步，而imu时间戳和雷达时间戳相差大于10s，则输出错误信息
     if (!time_sync_en && abs(last_timestamp_imu - last_timestamp_lidar) > 10.0 && !imu_buffer.empty() && !lidar_buffer.empty() )
     {
         printf("IMU and LiDAR not Synced, IMU time: %lf, lidar header time: %lf \n",last_timestamp_imu, last_timestamp_lidar);
     }
-
+    // time_sync_en为true时，当imu时间戳和雷达时间戳相差大于1s时，进行时间同步
     if (time_sync_en && !timediff_set_flg && abs(last_timestamp_lidar - last_timestamp_imu) > 1 && !imu_buffer.empty())
     {
         timediff_set_flg = true;
@@ -324,6 +327,8 @@ void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg)
 
     PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
     p_pre->process(msg, ptr);
+    // 建议是重新设计结构体，包含该帧点云的时间戳
+    // PointCloud: TimeStamp cloud_ptr, 队列类型 std::deque<PointCloud> pointcloud_deque;
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(last_timestamp_lidar);
     
@@ -338,6 +343,7 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
     sensor_msgs::Imu::Ptr msg(new sensor_msgs::Imu(*msg_in));
 
+    // 手动设置偏移时间
     msg->header.stamp = ros::Time().fromSec(msg_in->header.stamp.toSec() - time_diff_lidar_to_imu);
     if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
     {
@@ -362,7 +368,9 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     sig_buffer.notify_all();
 }
 
+//一帧点云扫描的平均时间
 double lidar_mean_scantime = 0.0;
+//点云扫描次数
 int    scan_num = 0;
 bool sync_packages(MeasureGroup &meas)
 {
@@ -371,17 +379,22 @@ bool sync_packages(MeasureGroup &meas)
     }
 
     /*** push a lidar scan ***/
+    // 放入一帧lidar点云到meas中
     if(!lidar_pushed)
     {
         meas.lidar = lidar_buffer.front();
+        // 该次激光雷达扫描开始时间
         meas.lidar_beg_time = time_buffer.front();
-        if (meas.lidar->points.size() <= 1) // time too little
+        // 计算该次激光雷达扫描的结束时间
+        // 因为经过点云特征提取后，点云的结束时间会错乱，所以不如，在接收该帧雷达时，再建一个time_back_buffer,记录最后一个点的偏移时间
+        if (meas.lidar->points.size() <= 1) // 点云太少，手动设置结束时间
         {
             lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
             ROS_WARN("Too few input point cloud!\n");
         }
-        else if (meas.lidar->points.back().curvature / double(1000) < 0.5 * lidar_mean_scantime)
+        else if (meas.lidar->points.back().curvature / double(1000) < 0.5 * lidar_mean_scantime) 
         {
+            //如果某次扫描时间太短了，手动设置结束时间  // use curvature as time of each laser points, curvature unit: ms
             lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
         }
         else
@@ -396,6 +409,7 @@ bool sync_packages(MeasureGroup &meas)
         lidar_pushed = true;
     }
 
+    // 如果当前IMU数据时间慢于lidar，返回等待数据
     if (last_timestamp_imu < lidar_end_time)
     {
         return false;
@@ -793,11 +807,30 @@ int main(int argc, char** argv)
     path.header.stamp    = ros::Time::now();
     path.header.frame_id ="camera_init";
 
+
+    /** 变量定义
+     * effect_feat_num          （后面的代码中没有用到该变量）
+     * frame_num                雷达总帧数
+     * deltaT                   （后面的代码中没有用到该变量）
+     * deltaR                   （后面的代码中没有用到该变量）
+     * aver_time_consu          每帧平均的处理总时间
+     * aver_time_icp            每帧中icp的平均时间
+     * aver_time_match          每帧中匹配的平均时间
+     * aver_time_incre          每帧中ikd-tree增量处理的平均时间
+     * aver_time_solve          每帧中计算的平均时间
+     * aver_time_const_H_time   每帧中计算的平均时间（当H恒定时）
+     * flg_EKF_converged        （后面的代码中没有用到该变量）
+     * EKF_stop_flg             （后面的代码中没有用到该变量）
+     * FOV_DEG                  （后面的代码中没有用到该变量）
+     * HALF_FOV_COS             （后面的代码中没有用到该变量）
+     * _featsArray              （后面的代码中没有用到该变量）
+     */
     /*** variables definition ***/
     int effect_feat_num = 0, frame_num = 0;
     double deltaT, deltaR, aver_time_consu = 0, aver_time_icp = 0, aver_time_match = 0, aver_time_incre = 0, aver_time_solve = 0, aver_time_const_H_time = 0;
     bool flg_EKF_converged, EKF_stop_flg = 0;
     
+    // 未使用
     FOV_DEG = (fov_deg + 10.0) > 179.9 ? 179.9 : (fov_deg + 10.0);
     HALF_FOV_COS = cos((FOV_DEG) * 0.5 * PI_M / 180.0);
 
@@ -810,6 +843,7 @@ int main(int argc, char** argv)
     memset(point_selected_surf, true, sizeof(point_selected_surf));
     memset(res_last, -1000.0f, sizeof(res_last));
 
+    // 设置IMU的参数，对p_imu进行初始化，其中p_imu为ImuProcess的智能指针（ImuProcess是进行IMU处理的类）
     Lidar_T_wrt_IMU<<VEC_FROM_ARRAY(extrinT);
     Lidar_R_wrt_IMU<<MAT_FROM_ARRAY(extrinR);
     p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
@@ -820,9 +854,13 @@ int main(int argc, char** argv)
 
     double epsi[23] = {0.001};
     fill(epsi, epsi+23, 0.001);
+
+    //接收特定于系统的模型及其差异
+    //作为一个维数变化的特征矩阵进行测量。
+    //通过一个函数（h_dyn_share_in）同时计算测量（z）、估计测量（h）、偏微分矩阵（h_x，h_v）和噪声协方差（R）。
     kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
-    /*** debug record ***/
+    /*** debug record ***/  //需要学习file debug
     FILE *fp;
     string pos_log_dir = root_dir + "/Log/pos_log.txt";
     fp = fopen(pos_log_dir.c_str(),"w");
@@ -841,8 +879,11 @@ int main(int argc, char** argv)
         nh.subscribe(lid_topic, 200000, livox_pcl_cbk) : \
         nh.subscribe(lid_topic, 200000, standard_pcl_cbk);
     ros::Subscriber sub_imu = nh.subscribe(imu_topic, 200000, imu_cbk);
+
+    // 发布当前正在扫描的点云
     ros::Publisher pubLaserCloudFull = nh.advertise<sensor_msgs::PointCloud2>
             ("/cloud_registered", 100000);
+    // 发布经过运动畸变校正注册到IMU坐标系的点云
     ros::Publisher pubLaserCloudFull_body = nh.advertise<sensor_msgs::PointCloud2>
             ("/cloud_registered_body", 100000);
     ros::Publisher pubLaserCloudEffect = nh.advertise<sensor_msgs::PointCloud2>
@@ -854,13 +895,17 @@ int main(int argc, char** argv)
     ros::Publisher pubPath          = nh.advertise<nav_msgs::Path> 
             ("/path", 100000);
 //------------------------------------------------------------------------------------------------------
+    //当程序检测到signal信号（例如ctrl+c） 时  执行 SigHandle 函数
     signal(SIGINT, SigHandle);
+     // 设置ROS程序主循环每次运行的时间至少为0.0002秒（5000Hz）
     ros::Rate rate(5000);
     bool status = ros::ok();
     while (status)
     {
         if (flg_exit) break;
+         // ROS消息回调处理函数，放在ROS的主循环中
         ros::spinOnce();
+        // 将激光雷达点云数据和IMU数据从buffer缓存队列中取出，进行时间对齐，并保存到Measures中
         if(sync_packages(Measures)) 
         {
             if (flg_first_scan)
