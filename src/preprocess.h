@@ -3,6 +3,9 @@
 #include <sensor_msgs/PointCloud2.h>
 #include <livox_ros_driver/CustomMsg.h>
 
+// 处理激光雷达数据头文件
+// 1、封装点云格式
+// 2、回调订阅后统一为pcl格式
 using namespace std;
 
 #define IS_VALID(a)  ((abs(a)>1e8) ? true : false)
@@ -10,12 +13,17 @@ using namespace std;
 typedef pcl::PointXYZINormal PointType;
 typedef pcl::PointCloud<PointType> PointCloudXYZI;
 
+// 支持激光雷达类型
 enum LID_TYPE{AVIA = 1, VELO16, OUST64}; //{1, 2, 3}
 enum TIME_UNIT{SEC = 0, MS = 1, US = 2, NS = 3};
+// 特征点类型 // 正常点、可能的平面点、确定的平面点、有跨越的边、边上的平面点、线段、无效点
 enum Feature{Nor, Poss_Plane, Real_Plane, Edge_Jump, Edge_Plane, Wire, ZeroPoint};
+// 位置标识
 enum Surround{Prev, Next};
+// 表示有跨越边的类型
 enum E_jump{Nr_nor, Nr_zero, Nr_180, Nr_inf, Nr_blind};
 
+// 用于存储激光雷达点的一些其他属性
 struct orgtype
 {
   double range;
@@ -34,6 +42,7 @@ struct orgtype
   }
 };
 
+// velodyne数据结构
 namespace velodyne_ros {
   struct EIGEN_ALIGN16 Point {
       PCL_ADD_POINT4D;
@@ -52,6 +61,7 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(velodyne_ros::Point,
     (uint16_t, ring, ring)
 )
 
+// ouster数据结构
 namespace ouster_ros {
   struct EIGEN_ALIGN16 Point {
       PCL_ADD_POINT4D;
@@ -83,11 +93,13 @@ class Preprocess
 {
   public:
 //   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
+  // 构造函数传参和初始化feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1)
   Preprocess();
   ~Preprocess();
   
+  // 对Livox自定义Msg格式的激光雷达数据进行处理
   void process(const livox_ros_driver::CustomMsg::ConstPtr &msg, PointCloudXYZI::Ptr &pcl_out);
+  // 对ros的Msg格式的激光雷达数据进行处理
   void process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointCloudXYZI::Ptr &pcl_out);
   void set(bool feat_en, int lid_type, double bld, int pfilt_num);
 

@@ -91,7 +91,7 @@ double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
-bool   point_selected_surf[100000] = {0};
+bool   point_selected_surf[100000] = {0};   // 有效的特征点
 bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
 
@@ -113,6 +113,7 @@ PointCloudXYZI::Ptr laserCloudOri(new PointCloudXYZI(100000, 1));
 PointCloudXYZI::Ptr corr_normvect(new PointCloudXYZI(100000, 1));
 PointCloudXYZI::Ptr _featsArray;
 
+// VoxelGrid:使用体素化网格的方法实现下采样，并保持点云的形状特征
 pcl::VoxelGrid<PointType> downSizeFilterSurf;
 pcl::VoxelGrid<PointType> downSizeFilterMap;
 
@@ -127,8 +128,11 @@ M3D Lidar_R_wrt_IMU(Eye3d);
 
 /*** EKF inputs and output ***/
 MeasureGroup Measures;
+// state_ikfom:22维
+// 系统噪声的维数：12
+// input_ikfom:6维
 esekfom::esekf<state_ikfom, 12, input_ikfom> kf;
-state_ikfom state_point;
+state_ikfom state_point; // 状态向量（反馈之后）
 vect3 pos_lid;
 
 nav_msgs::Path path;
@@ -656,6 +660,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         omp_set_num_threads(MP_PROC_NUM);
         #pragma omp parallel for
     #endif
+    // 遍历所有点，构建点到面残差
     for (int i = 0; i < feats_down_size; i++)
     {
         PointType &point_body  = feats_down_body->points[i]; 
@@ -672,7 +677,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         vector<float> pointSearchSqDis(NUM_MATCH_POINTS);
 
         auto &points_near = Nearest_Points[i];
-
+        // ekfom_data ?
         if (ekfom_data.converge)
         {
             /** Find the closest surfaces in the map **/
@@ -687,6 +692,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         if (esti_plane(pabcd, points_near, 0.1f))
         {
             float pd2 = pabcd(0) * point_world.x + pabcd(1) * point_world.y + pabcd(2) * point_world.z + pabcd(3);
+             // 发射距离越长，测量误差越大，归一化，消除雷达点发射距离的影响
             float s = 1 - 0.9 * fabs(pd2) / sqrt(p_body.norm());
 
             if (s > 0.9)
@@ -700,14 +706,16 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
             }
         }
     }
-    
+    // 有效点计数
     effct_feat_num = 0;
 
     for (int i = 0; i < feats_down_size; i++)
     {
         if (point_selected_surf[i])
         {
+            // L系点云 
             laserCloudOri->points[effct_feat_num] = feats_down_body->points[i];
+            // 平面法相量和残差
             corr_normvect->points[effct_feat_num] = normvec->points[i];
             total_residual += res_last[i];
             effct_feat_num ++;
@@ -726,24 +734,37 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     double solve_start_  = omp_get_wtime();
     
     /*** Computation of Measuremnt Jacobian matrix H and measurents vector ***/
+    // 计算雅可比矩阵，以及观测向量
+    // h_x是观测h相对于状态x的jacobian，见fatliov1的论文公式(14)
+    // h_x 为观测相对于（姿态、位置、imu和雷达间的变换）
+    //的雅克比，尺寸为 特征点数x12
     ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 12); //23
     ekfom_data.h.resize(effct_feat_num);
 
     for (int i = 0; i < effct_feat_num; i++)
     {
+        //当前L系的点
         const PointType &laser_p  = laserCloudOri->points[i];
         V3D point_this_be(laser_p.x, laser_p.y, laser_p.z);
         M3D point_be_crossmat;
+        // 反对称矩阵
         point_be_crossmat << SKEW_SYM_MATRX(point_this_be);
+        // 当前I系点
         V3D point_this = s.offset_R_L_I * point_this_be + s.offset_T_L_I;
         M3D point_crossmat;
+        // 反对称矩阵
         point_crossmat<<SKEW_SYM_MATRX(point_this);
 
         /*** get the normal vector of closest surface/corner ***/
+        // 当前点对应平面的法向量n
         const PointType &norm_p = corr_normvect->points[i];
         V3D norm_vec(norm_p.x, norm_p.y, norm_p.z);
 
         /*** calculate the Measuremnt Jacobian matrix H ***/
+        // conjugate:共轭，相当于矩阵求逆  A_3x1 = p^ * C = p^ * G^R_I(-1)* n 
+        //  FIXME:
+        //  注意，这里A是列向量，而论文推导种Hj是行向量，故这里从列向量到行向量，做了一次转置 ref:https://github.com/hku-mars/FAST_LIO/issues/62
+        //  而在进行转置处理后，就不会有负号了 ref:https://github.com/hku-mars/FAST_LIO/issues/28
         V3D C(s.rot.conjugate() *norm_vec);
         V3D A(point_crossmat * C);
         if (extrinsic_est_en)
@@ -753,10 +774,13 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         }
         else
         {
+            // 从第i行，第0列开始 法向量n 1x3, 
+            // 位置，旋转
             ekfom_data.h_x.block<1, 12>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
         }
 
         /*** Measuremnt: distance to the closest surface/corner ***/
+        // 观测量z,点到平面距离
         ekfom_data.h(i) = -norm_p.intensity;
     }
     solve_time += omp_get_wtime() - solve_start_;
@@ -787,8 +811,8 @@ int main(int argc, char** argv)
     nh.param<double>("mapping/acc_cov",acc_cov,0.1);
     nh.param<double>("mapping/b_gyr_cov",b_gyr_cov,0.0001);
     nh.param<double>("mapping/b_acc_cov",b_acc_cov,0.0001);
-    nh.param<double>("preprocess/blind", p_pre->blind, 0.01);       // 最小距离阈值，即过滤掉0～blind范围内的点云
-    nh.param<int>("preprocess/lidar_type", p_pre->lidar_type, AVIA);
+    nh.param<double>("preprocess/blind", p_pre->blind, 0.01);        // 最小距离阈值，即过滤掉0～blind范围内的点云
+    nh.param<int>("preprocess/lidar_type", p_pre->lidar_type, AVIA); //直接赋值给类中的变量
     nh.param<int>("preprocess/scan_line", p_pre->N_SCANS, 16);
     nh.param<int>("preprocess/timestamp_unit", p_pre->time_unit, US);
     nh.param<int>("preprocess/scan_rate", p_pre->SCAN_RATE, 10);
@@ -925,6 +949,7 @@ int main(int argc, char** argv)
             svd_time   = 0;
             t0 = omp_get_wtime();
 
+            // 传入一帧激光点云和IMU进行递推和去畸变
             p_imu->Process(Measures, kf, feats_undistort);
             state_point = kf.get_x();
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
