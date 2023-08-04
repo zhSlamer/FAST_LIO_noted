@@ -256,7 +256,8 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
 
   double dt = 0;
 
-  input_ikfom in;
+  input_ikfom in; // 输入6维 a w
+  // 遍历本次估计的所有IMU测量并且进行积分，离散中值法 前向传播
   for (auto it_imu = v_imu.begin(); it_imu < (v_imu.end() - 1); it_imu++)
   {
     auto &&head = *(it_imu);
@@ -273,20 +274,22 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
 
     // fout_imu << setw(10) << head->header.stamp.toSec() - first_lidar_time << " " << angvel_avr.transpose() << " " << acc_avr.transpose() << endl;
 
+    // 归一化后再乘 9.81
     acc_avr     = acc_avr * G_m_s2 / mean_acc.norm(); // - state_inout.ba;
-
+    //如果IMU开始时刻早于上次雷达最晚时刻(因为将上次最后一个IMU插入到此次开头了，所以会出现一次这种情况)
     if(head->header.stamp.toSec() < last_lidar_end_time_)
     {
-      dt = tail->header.stamp.toSec() - last_lidar_end_time_;
+      dt = tail->header.stamp.toSec() - last_lidar_end_time_;    //从上次雷达时刻末尾开始传播 计算与此次IMU结尾之间的时间差
       // dt = tail->header.stamp.toSec() - pcl_beg_time;
     }
     else
     {
-      dt = tail->header.stamp.toSec() - head->header.stamp.toSec();
+      dt = tail->header.stamp.toSec() - head->header.stamp.toSec(); //两个IMU时刻之间的时间间隔
     }
-    
+    // 原始测量的中值作为更新
     in.acc = acc_avr;
     in.gyro = angvel_avr;
+    // 配置协方差矩阵
     Q.block<3, 3>(0, 0).diagonal() = cov_gyr;
     Q.block<3, 3>(3, 3).diagonal() = cov_acc;
     Q.block<3, 3>(6, 6).diagonal() = cov_bias_gyr;
@@ -294,25 +297,29 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
     kf_state.predict(dt, Q, in);
 
     /* save the poses at each IMU measurements */
+    // 保存IMU预测过程的状态
     imu_state = kf_state.get_x();
-    angvel_last = angvel_avr - imu_state.bg;
-    acc_s_last  = imu_state.rot * (acc_avr - imu_state.ba);
+    angvel_last = angvel_avr - imu_state.bg;                //计算出来的角速度与预测的角速度的差值
+    acc_s_last  = imu_state.rot * (acc_avr - imu_state.ba); //计算出来的加速度与预测的加速度的差值,并转到IMU坐标系下
     for(int i=0; i<3; i++)
     {
-      acc_s_last[i] += imu_state.grav[i];
+      acc_s_last[i] += imu_state.grav[i];                   //加上重力得到世界坐标系的加速度
     }
     double &&offs_t = tail->header.stamp.toSec() - pcl_beg_time;
+    //保存IMU预测过程的状态
     IMUpose.push_back(set_pose6d(offs_t, acc_s_last, angvel_last, imu_state.vel, imu_state.pos, imu_state.rot.toRotationMatrix()));
   }
 
   /*** calculated the pos and attitude prediction at the frame-end ***/
+  //保存IMU预测过程的状态
+  // 判断雷达结束时间是否晚于IMU，最后一个IMU时刻可能早于雷达末尾 也可能晚于雷达末尾
   double note = pcl_end_time > imu_end_time ? 1.0 : -1.0;
   dt = note * (pcl_end_time - imu_end_time);
   kf_state.predict(dt, Q, in);
   
-  imu_state = kf_state.get_x();
-  last_imu_ = meas.imu.back();
-  last_lidar_end_time_ = pcl_end_time;
+  imu_state = kf_state.get_x();           //更新IMU状态，以便于下一帧使用
+  last_imu_ = meas.imu.back();            //保存最后一个IMU测量，以便于下一帧使用
+  last_lidar_end_time_ = pcl_end_time;    //保存这一帧最后一个雷达测量的结束时间，以便于下一帧使用
 
   /*** undistort each lidar point (backward propagation) ***/
   if (pcl_out.points.begin() == pcl_out.points.end()) return;
