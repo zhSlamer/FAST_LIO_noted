@@ -65,11 +65,17 @@
 #define MAXN                (720000)
 #define PUBFRAME_PERIOD     (20)
 
+// kdtree_incremental_time为kdtree建立时间，kdtree_search_time为kdtree搜索时间，kdtree_delete_time为kdtree删除时间;
+// T1为雷达初始时间戳，s_plot为整个流程耗时，s_plot2特征点数量,s_plot3为kdtree增量时间，s_plot4为kdtree搜索耗时，s_plot5为kdtree删除点数量
+//，s_plot6为kdtree删除耗时，s_plot7为kdtree初始大小，s_plot8为kdtree结束大小,s_plot9为平均消耗时间，s_plot10为添加点数量，s_plot11为点云预处理的总时间
 /*** Time Log Variables ***/
 double kdtree_incremental_time = 0.0, kdtree_search_time = 0.0, kdtree_delete_time = 0.0;
 double T1[MAXN], s_plot[MAXN], s_plot2[MAXN], s_plot3[MAXN], s_plot4[MAXN], s_plot5[MAXN], s_plot6[MAXN], s_plot7[MAXN], s_plot8[MAXN], s_plot9[MAXN], s_plot10[MAXN], s_plot11[MAXN];
+// 定义全局变量，用于记录时间,match_time为匹配时间，solve_time为求解时间，solve_const_H_time为求解H矩阵时间
 double match_time = 0, solve_time = 0, solve_const_H_time = 0;
+// kdtree_size_st为ikd-tree获得的节点数，kdtree_size_end为ikd-tree结束时的节点数，add_point_size为添加点的数量，kdtree_delete_counter为删除点的数
 int    kdtree_size_st = 0, kdtree_size_end = 0, add_point_size = 0, kdtree_delete_counter = 0;
+// runtime_pos_log运行时的log是否开启，pcd_save_en是否保存pcd文件，time_sync_en是否同步
 bool   runtime_pos_log = false, pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true, path_en = true;
 /**************************/
 
@@ -81,17 +87,20 @@ double time_diff_lidar_to_imu = 0.0;
 mutex mtx_buffer;
 condition_variable sig_buffer;
 
-string root_dir = ROOT_DIR;
+string root_dir = ROOT_DIR;                     //设置根目录 CMakeLists获取根目录
 string map_file_path, lid_topic, imu_topic;
 
+//设置残差平均值，残差总和
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
+//设置有效特征点数，时间log计数器, scan_count：接收到的激光雷达Msg的总数，publish_count：接收到的IMU的Msg的总数
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
 bool   point_selected_surf[100000] = {0};   // 有效的特征点
+// lidar_pushed：用于判断激光雷达数据是否从缓存队列中拿到meas中的数据, flg_EKF_inited用于判断EKF是否初始化完成
 bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
 
@@ -128,9 +137,7 @@ M3D Lidar_R_wrt_IMU(Eye3d);
 
 /*** EKF inputs and output ***/
 MeasureGroup Measures;
-// state_ikfom:22维
-// 系统噪声的维数：12
-// input_ikfom:6维
+// state_ikfom:状态变量23维，系统噪声的维数：12，IMU量测input_ikfom:6维
 esekfom::esekf<state_ikfom, 12, input_ikfom> kf;
 state_ikfom state_point; // 状态向量（反馈之后）
 vect3 pos_lid;
@@ -230,15 +237,17 @@ void points_cache_collect()
     // for (int i = 0; i < points_history.size(); i++) _featsArray->push_back(points_history[i]);
 }
 
-BoxPointType LocalMap_Points;
-bool Localmap_Initialized = false;
+BoxPointType LocalMap_Points;           // ikd-tree中,局部地图的包围盒角点
+bool Localmap_Initialized = false;      // 局部地图是否初始化
 void lasermap_fov_segment()
 {
     cub_needrm.clear();
     kdtree_delete_counter = 0;
     kdtree_delete_time = 0.0;    
     pointBodyToWorld(XAxisPoint_body, XAxisPoint_world);
+     // global系下lidar位置
     V3D pos_LiD = pos_lid;
+    //初始化局部地图包围盒角点，以为w系下lidar位置为中心,得到长宽高200*200*200的局部地图
     if (!Localmap_Initialized){
         for (int i = 0; i < 3; i++){
             LocalMap_Points.vertex_min[i] = pos_LiD(i) - cube_len / 2.0;
@@ -247,15 +256,20 @@ void lasermap_fov_segment()
         Localmap_Initialized = true;
         return;
     }
+    // 各个方向上Lidar与局部地图边界的距离，或者说是lidar与立方体盒子六个面的距离
     float dist_to_map_edge[3][2];
     bool need_move = false;
+    // 当前雷达系中心到各个地图边缘的距离
     for (int i = 0; i < 3; i++){
         dist_to_map_edge[i][0] = fabs(pos_LiD(i) - LocalMap_Points.vertex_min[i]);
         dist_to_map_edge[i][1] = fabs(pos_LiD(i) - LocalMap_Points.vertex_max[i]);
+        // 与某个方向上的边界距离（例如1.5*300m）太小，标记需要移除need_move，参考论文Fig3
         if (dist_to_map_edge[i][0] <= MOV_THRESHOLD * DET_RANGE || dist_to_map_edge[i][1] <= MOV_THRESHOLD * DET_RANGE) need_move = true;
     }
+    // 不需要挪动就直接退回了
     if (!need_move) return;
     BoxPointType New_LocalMap_Points, tmp_boxpoints;
+    // 新的局部地图盒子边界点
     New_LocalMap_Points = LocalMap_Points;
     float mov_dist = max((cube_len - 2.0 * MOV_THRESHOLD * DET_RANGE) * 0.5 * 0.9, double(DET_RANGE * (MOV_THRESHOLD -1)));
     for (int i = 0; i < 3; i++){
@@ -276,6 +290,7 @@ void lasermap_fov_segment()
 
     points_cache_collect();
     double delete_begin = omp_get_wtime();
+    // 使用Boxs删除指定盒内的点
     if(cub_needrm.size() > 0) kdtree_delete_counter = ikdtree.Delete_Point_Boxes(cub_needrm);
     kdtree_delete_time = omp_get_wtime() - delete_begin;
 }
@@ -818,7 +833,7 @@ int main(int argc, char** argv)
     nh.param<int>("preprocess/scan_rate", p_pre->SCAN_RATE, 10);
     nh.param<int>("point_filter_num", p_pre->point_filter_num, 2);
     nh.param<bool>("feature_extract_enable", p_pre->feature_enabled, false);
-    nh.param<bool>("runtime_pos_log_enable", runtime_pos_log, 0);
+    nh.param<bool>("runtime_pos_log_enable", runtime_pos_log, 0);           // 是否输出调试log信息
     nh.param<bool>("mapping/extrinsic_est_en", extrinsic_est_en, true);
     nh.param<bool>("pcd_save/pcd_save_en", pcd_save_en, false);
     nh.param<int>("pcd_save/interval", pcd_save_interval, -1);
@@ -864,13 +879,16 @@ int main(int argc, char** argv)
     memset(res_last, -1000.0f, sizeof(res_last));
     downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
     downSizeFilterMap.setLeafSize(filter_size_map_min, filter_size_map_min, filter_size_map_min);
+    // 将从点云中挑选的平面点数组point_selected_surf内元素的值全部设为true，数组point_selected_surf用于平面特征点
     memset(point_selected_surf, true, sizeof(point_selected_surf));
+    // 将数组res_last内元素的值全部设置为-1000.0f，数组res_last用于点与平面间的残差距离
     memset(res_last, -1000.0f, sizeof(res_last));
 
     // 设置IMU的参数，对p_imu进行初始化，其中p_imu为ImuProcess的智能指针（ImuProcess是进行IMU处理的类）
     Lidar_T_wrt_IMU<<VEC_FROM_ARRAY(extrinT);
     Lidar_R_wrt_IMU<<MAT_FROM_ARRAY(extrinR);
     p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
+    // 协方差向量cov_w  = [gyr_cov, acc_cov, b_gyr_cov, b_acc_cov]
     p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));
     p_imu->set_acc_cov(V3D(acc_cov, acc_cov, acc_cov));
     p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
@@ -879,9 +897,8 @@ int main(int argc, char** argv)
     double epsi[23] = {0.001};
     fill(epsi, epsi+23, 0.001);
 
-    //接收特定于系统的模型及其差异
-    //作为一个维数变化的特征矩阵进行测量。
     //通过一个函数（h_dyn_share_in）同时计算测量（z）、估计测量（h）、偏微分矩阵（h_x，h_v）和噪声协方差（R）。
+    // get_f 为f(x,u)dt, df_dx = Fx, df_dw = Fw , h_share_model = H , epsi 收敛阈值
     kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
     /*** debug record ***/  //需要学习file debug

@@ -2,8 +2,8 @@
 #define USE_IKFOM_H
 
 #include <IKFoM_toolkit/esekfom/esekfom.hpp>
-
-//该hpp主要包含：状态变量x，输入量u的定义，以及正向传播中相关矩阵的函数
+// 使用IKF库esekfom.hpp
+// 定义状态变量x，输入量u、IMU噪声w，以及正向传播中相关矩阵的函数f()、Fx、Fw、SO3转欧拉角
 /*
 这个hpp主要包含：
 1.状态变量、输入、噪声量的定义  
