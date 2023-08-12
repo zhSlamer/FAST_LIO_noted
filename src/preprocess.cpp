@@ -113,17 +113,19 @@ uint8 line              # laser number in lidar
 void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg)
 {
   // 清除之前的点云缓存
-  pl_surf.clear();             // 清除之前的平面点云缓存
-  pl_corn.clear();             // 清除之前的角点云缓存
-  pl_full.clear();             // 清除之前的全点云缓存
-  double t1 = omp_get_wtime(); // 后面没用到
+  pl_surf.clear();             
+  pl_corn.clear();             
+  pl_full.clear();             
+  double t1 = omp_get_wtime(); 
   int plsize = msg->point_num; // 一帧中的点云总个数
   // cout<<"plsie: "<<plsize<<endl;
 
-  pl_corn.reserve(plsize);
-  pl_surf.reserve(plsize);
-  pl_full.resize(plsize);
+  //点云预留空间
+  pl_corn.reserve(plsize);  //角点
+  pl_surf.reserve(plsize);  //面点
+  pl_full.resize(plsize);   //储存全部点，特征或者间隔采样后
 
+  // 根据线束，初始化线束数组的空间
   for(int i=0; i<N_SCANS; i++)
   {
     // 存储每一根线的点云 PointCloudXYZI pl_buff[128]; //maximum 128 line lidar
@@ -135,6 +137,7 @@ void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg)
   // 开启特征提取
   if (feature_enabled)
   {
+    // 遍历每一个点
     for(uint i=1; i<plsize; i++)
     {
       if((msg->points[i].line < N_SCANS) && ((msg->points[i].tag & 0x30) == 0x10 || (msg->points[i].tag & 0x30) == 0x00))
@@ -146,10 +149,12 @@ void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg)
         pl_full[i].curvature = msg->points[i].offset_time / float(1000000); //use curvature as time of each laser points，curvature unit: ms
 
         bool is_new = false;
+        // 前后两点不重合
         if((abs(pl_full[i].x - pl_full[i-1].x) > 1e-7) 
             || (abs(pl_full[i].y - pl_full[i-1].y) > 1e-7)
             || (abs(pl_full[i].z - pl_full[i-1].z) > 1e-7))
         {
+          // 按照line划分点云，根据同一线束上的点提取特征，保存到线束数组中
           pl_buff[msg->points[i].line].push_back(pl_full[i]);
         }
       }
@@ -160,40 +165,43 @@ void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg)
     double t0 = omp_get_wtime();
     // 对每个line中的激光雷达分别进行处理
     for(int j=0; j<N_SCANS; j++)
-    {
+    { 
       // // 如果该line中的点云过小，则继续处理下一条line
       if(pl_buff[j].size() <= 5) continue;
+      // 当前线束中的点云pl
       pcl::PointCloud<PointType> &pl = pl_buff[j];
       plsize = pl.size();
+      // 当前线束中激光点类型容器，建立了一个容器数组，储存每个点代表的类型，记录了距离，角度，特征
       vector<orgtype> &types = typess[j];
       types.clear();
       types.resize(plsize);
       plsize--;
       for(uint i=0; i<plsize; i++)
       {
-        // 计算每个点的距离
+        // 计算每个点xy平面距离
         types[i].range = sqrt(pl[i].x * pl[i].x + pl[i].y * pl[i].y);
         vx = pl[i].x - pl[i + 1].x;
         vy = pl[i].y - pl[i + 1].y;
         vz = pl[i].z - pl[i + 1].z;
-        // // 计算两个间隔点的距离
+        // 计算两个间隔点的距离
         types[i].dista = sqrt(vx * vx + vy * vy + vz * vz);
       }
       // //因为i最后一个点没有i+1了所以就单独求了一个range，没有distance
       types[plsize].range = sqrt(pl[plsize].x * pl[plsize].x + pl[plsize].y * pl[plsize].y);
-      // 找特征点， 传入同一根线点云和间距
+      // 传入同一线束点云和距离、间距属性，计算特征
       give_feature(pl, types);
       // pl_surf += pl;
     }
     time += omp_get_wtime() - t0;
     printf("Feature extraction time: %lf \n", time / count);
   }
-  // 全点云，构建点面残差
+  // 不进行特征提取，全点云，构建点面残差
   else
   {
     //遍历msg中所有点，并存储到pl_surf中
     for(uint i=1; i<plsize; i++)
     {
+      // 只取线数在0~N_SCANS内并且回波次序为0或者1的点云
       if((msg->points[i].line < N_SCANS) && ((msg->points[i].tag & 0x30) == 0x10 || (msg->points[i].tag & 0x30) == 0x00))
       {
         valid_num ++;
@@ -490,6 +498,7 @@ void Preprocess::velodyne_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
     }
 }
 
+// pl 一条line的点云信息，该line点云每点的属性
 void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &types)
 {
   int plsize = pl.size();  //单条线的点数
@@ -508,6 +517,7 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
 
   // Surf
   // group_size默认等于8  plsize2 = plsize - group_size
+  // 点云总数要有8个点冗余
   plsize2 = (plsize > group_size) ? (plsize - group_size) : 0;
 
   Eigen::Vector3d curr_direct(Eigen::Vector3d::Zero()); //当前平面的法向量
@@ -517,7 +527,8 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
   uint last_i = 0; uint last_i_nex = 0;     // last_i为上一个点的保存的索引 // last_i_nex为上一个点的下一个点的索引
   int last_state = 0;                       // 为1代表上个状态为平面 否则为0
   int plane_type;                           // 判断面点
-  // 拿到8个点用于判断平面
+
+  // 判断平面特征   
   for(uint i=head; i<plsize2; i++)
   {
     // 在盲区范围内的点不做处理
@@ -525,36 +536,45 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
     {
       continue;
     }
-    //更新i2
+    // i2记录当前点索引
     i2 = i;
-    //求得平面，并返回类型0 1 2
+    // i_nex 局部最后一个点的索引
+    // curr_direct 归一化后，局部范围最后一个点与第一个点的坐标差值，即向量 i_cur --> i_nex
+    //求得平面，并返回类型0 1平面 2
     plane_type = plane_judge(pl, types, i, i_nex, curr_direct);
+    
     //返回1一般默认是平面
     if(plane_type == 1)
-    {//设置确定的平面点和可能的平面点
+    {
+      //设置确定的平面点和可能的平面点
       for(uint j=i; j<=i_nex; j++)
       { 
         if(j!=i && j!=i_nex)
-        {//把起始点和终止点之间的所有点设置为确定的平面点
+        {
+          // 局部范围内部点设置为确定的平面点
           types[j].ftype = Real_Plane;
         }
         else
-        {//把起始点和终止点设置为可能的平面点
+        {
+          // 局部范围边界点设置为可能的平面点
           types[j].ftype = Poss_Plane;
         }
       }
       
-      // if(last_state==1 && fabs(last_direct.sum())>0.5)
+      // if(last_state==1 && fabs(last_direct.sum())>0.5) 
       //如果之前状态是平面则判断当前点是处于两平面边缘的点还是较为平坦的平面的点
+      // 根据上一状态，平面或者局部以及长度，向量模长，决定起始点类型
       if(last_state==1 && last_direct.norm()>0.1)
       {
         double mod = last_direct.transpose() * curr_direct;
         if(mod>-0.707 && mod<0.707)
-        {//修改ftype，两个面法向量夹角在45度和135度之间 认为是两平面边缘上的点
+        {
+          //修改ftype，两个面法向量夹角在45度和135度之间 认为是两平面边缘上的点
           types[i].ftype = Edge_Plane;
         }
         else
-        {//否则认为是真正的平面点
+        {
+          //否则认为是真正的平面点
           types[i].ftype = Real_Plane;
         }
       }
@@ -613,11 +633,12 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
 
     //   }
     // }
-
+    // 更新last状态
     last_i = i2;
     last_i_nex = i_nex;
     last_direct = curr_direct;
   }
+  // 头三个和尾三个留出
   //判断边缘点 //如果剩下的点数小于3则不判断边缘点，否则计算哪些点是边缘点
   plsize2 = plsize > 3 ? plsize - 3 : 0;
   for(uint i=head+3; i<plsize2; i++)
@@ -633,38 +654,49 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
     }
     //当前点组成的向量
     Eigen::Vector3d vec_a(pl[i].x, pl[i].y, pl[i].z);
-    Eigen::Vector3d vecs[2];
+    // 当前点指向前后相邻点的两个向量
+    Eigen::Vector3d vecs[2];  
 
+    // 更新当前点与前后两点的属性 保存到types[i].edj
+    // 计算当前点与后一点和前一点的向量，判断当前点前后两个方向的edge属性
     for(int j=0; j<2; j++)
     {
+      // 前一点 m=-1, 后一点 m=1
       int m = -1;
       if(j == 1)
       {
         m = 1;
       }
-      //若当前的前/后一个点在盲区内（4m)
+      //若当前的前/后一个点在盲区内
       if(types[i+m].range < blind)
-      { //若其大于10m
+      { 
+        //若当前点大于10m
         if(types[i].range > inf_bound)
         {
-          types[i].edj[j] = Nr_inf;//若其大于10m
+          types[i].edj[j] = Nr_inf;   //该点相邻点为无穷大点，跳变较远
         }
+        // 当前点小于10m
         else
         {
-          types[i].edj[j] = Nr_blind;//赋予该点Nr_blind(在盲区)
+          types[i].edj[j] = Nr_blind; //该点的相邻点在盲区
         }
+        // 下一个相邻点，即后一点
         continue;
       }
 
+      // 相邻点不在盲区
+      // 计算相邻点的向量
       vecs[j] = Eigen::Vector3d(pl[i+m].x, pl[i+m].y, pl[i+m].z);
-      vecs[j] = vecs[j] - vec_a; //前/后点指向当前点的向量
-
+      // 当前点指向相邻点的向量
+      vecs[j] = vecs[j] - vec_a; 
+      //假设雷达原点为O 前一个点为M 当前点为A 后一个点为N
+      // 这个是角OAM和角OAN的cos值
       types[i].angle[j] = vec_a.dot(vecs[j]) / vec_a.norm() / vecs[j].norm();
-      if(types[i].angle[j] < jump_up_limit)
+      if(types[i].angle[j] < jump_up_limit)   //小于170°
       {
         types[i].edj[j] = Nr_180;
       }
-      else if(types[i].angle[j] > jump_down_limit)
+      else if(types[i].angle[j] > jump_down_limit)    // 大于8度
       {
         types[i].edj[j] = Nr_zero;
       }
@@ -674,11 +706,14 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
     //得到的是cos角OAM的大小
     //角MAN的cos值
     types[i].intersect = vecs[Prev].dot(vecs[Next]) / vecs[Prev].norm() / vecs[Next].norm();
-    //前一个点是正常点 && 下一个点在激光线上 && 当前点与后一个点的距离大于0.0225m && 当前点与后一个点的距离大于当前点与前一个点距离的四倍
+    
+    // 根据前点edge jump属性，后一点edge jumo属性
+    // 前一个点是正常点 && 下一个点在激光线上 && 当前点与后一个点的距离大于0.0225m && 当前点与后一个点的距离大于当前点与前一个点距离的四倍
     if(types[i].edj[Prev]==Nr_nor && types[i].edj[Next]==Nr_zero && types[i].dista>0.0225 && types[i].dista>4*types[i-1].dista)
     {
-      if(types[i].intersect > cos160)
+      if(types[i].intersect > cos160) // 160度
       {
+        // 判断是否式边缘点
         if(edge_jump_judge(pl, types, i, Prev))
         {
           types[i].ftype = Edge_Jump;
@@ -828,7 +863,7 @@ int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, ui
   // i_nex = i_cur;
 
   double two_dis;
-  vector<double> disarr;  //前后点距离数组
+  vector<double> disarr;  //前后点距离数组 间距数组
   disarr.reserve(20);
   //距离小 点与点之间较近 先取够8个点
   for(i_nex=i_cur; i_nex<i_cur+group_size; i_nex++)
@@ -840,31 +875,35 @@ int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, ui
     }
     disarr.push_back(types[i_nex].dista); //存储当前点与后一个点的距离
   }
-  
+  // i_nex = i_cur+group_size;
+  //继续向后遍历，保存group_dis范围内，与后一个点的间距，记录最后一个局部点索引为i_nex
   for(;;)
   {
     if((i_cur >= pl.size()) || (i_nex >= pl.size())) break;
 
     if(types[i_nex].range < blind)
     {
-      curr_direct.setZero();
+      curr_direct.setZero(); //距离雷达原点太小,将法向量设置为零向量
       return 2;
     }
+    // 计算后面的点，与当前点距离的平方和
     vx = pl[i_nex].x - pl[i_cur].x;
     vy = pl[i_nex].y - pl[i_cur].y;
     vz = pl[i_nex].z - pl[i_cur].z;
     two_dis = vx*vx + vy*vy + vz*vz;
+    // 超出局部范围距离约束，退出循环  
     if(two_dis >= group_dis)
     {
       break;
     }
+    //存储当前点与后一个点的距离
     disarr.push_back(types[i_nex].dista);
     i_nex++;
   }
 
-  double leng_wid = 0;
+  double leng_wid = 0;                // 记录局部范围内，叉乘的最大模长，即局部范围内最大平行四边形面积
   double v1[3], v2[3];
-  for(uint j=i_cur+1; j<i_nex; j++)
+  for(uint j=i_cur+1; j<i_nex; j++)   // 局部范围内，从当前点向后遍历，i_nex为局部范围索引的最大值
   {
     if((j >= pl.size()) || (i_cur >= pl.size())) break;
     //假设i_cur点为A j点为B i_nex点为C
@@ -872,26 +911,30 @@ int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, ui
     v1[0] = pl[j].x - pl[i_cur].x;
     v1[1] = pl[j].y - pl[i_cur].y;
     v1[2] = pl[j].z - pl[i_cur].z;
+    // vx,vy,vz为 AC
     //向量AB叉乘向量AC
     v2[0] = v1[1]*vz - vy*v1[2];
     v2[1] = v1[2]*vx - v1[0]*vz;
     v2[2] = v1[0]*vy - vx*v1[1];
     //物理意义是组成的ABC组成的平行四边形面积的平方(为|AC|*h，其中为B到线AC的距离)
     double lw = v2[0]*v2[0] + v2[1]*v2[1] + v2[2]*v2[2];
+    // 寻找最大面积的平方 
     if(lw > leng_wid)
     {
       leng_wid = lw;  //寻找最大面积的平方(也就是寻找距离AC最远的B)
     }
   }
 
-
+  // AC*AC/S^2=1/(h*h)  p2l_ratio = 225;       
+  // 即 h越大，不能成为平面 当h>1/15m=0.0667m,距离太远了   
+  // 点到线的距离阈值，需要大于这个值才能判断组成面
   if((two_dis*two_dis/leng_wid) < p2l_ratio)
   {
     curr_direct.setZero();  //太近了法向量直接设置为0
     return 0;
   }
 
-  //太近了法向量直接设置为0
+  // 排序，disarr按从大到小排序
   uint disarrsize = disarr.size();
   for(uint j=0; j<disarrsize-1; j++)
   {
@@ -905,7 +948,7 @@ int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, ui
       }
     }
   }
-
+  // 第二小的点间距太小，也设置为0向量
   if(disarr[disarr.size()-2] < 1e-16)
   {
     curr_direct.setZero();
@@ -914,7 +957,7 @@ int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, ui
 
   if(lidar_type==AVIA)
   {
-    //点与点之间距离变化太大的时候 可能与激光束是平行的 就也舍弃了
+    //点与点之间距离变化太大的时候 可能与激光束是平行的 就也舍弃
     double dismax_mid = disarr[0]/disarr[disarrsize/2];
     double dismid_min = disarr[disarrsize/2]/disarr[disarrsize-2];
 
@@ -934,6 +977,7 @@ int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, ui
     }
   }
   
+  // 储存向量AC
   curr_direct << vx, vy, vz;
   curr_direct.normalize();
   return 1;

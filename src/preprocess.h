@@ -54,8 +54,8 @@ struct orgtype
   //假设雷达原点为O 前一个点为M 当前点为A 后一个点为N
   double angle[2];    // 这个是角OAM和角OAN的cos值
   double intersect;   // 这个是角MAN的cos值
-  E_jump edj[2];      // 这个是角MAN的cos值
-  Feature ftype;      // 点类型
+  E_jump edj[2];      // 点类型
+  Feature ftype;      
   orgtype()   
   {
     range = 0;
