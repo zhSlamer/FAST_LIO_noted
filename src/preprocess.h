@@ -16,23 +16,47 @@ typedef pcl::PointCloud<PointType> PointCloudXYZI;
 // 支持激光雷达类型
 enum LID_TYPE{AVIA = 1, VELO16, OUST64}; //{1, 2, 3}
 enum TIME_UNIT{SEC = 0, MS = 1, US = 2, NS = 3};
-// 特征点类型 // 正常点、可能的平面点、确定的平面点、有跨越的边、边上的平面点、线段、无效点
-enum Feature{Nor, Poss_Plane, Real_Plane, Edge_Jump, Edge_Plane, Wire, ZeroPoint};
-// 位置标识
-enum Surround{Prev, Next};
-// 表示有跨越边的类型
-enum E_jump{Nr_nor, Nr_zero, Nr_180, Nr_inf, Nr_blind};
+
+// 枚举类型：表示特征点的类型
+enum Feature
+{
+  Nor,        // 正常点
+  Poss_Plane, // 可能的平面点
+  Real_Plane, // 确定的平面点
+  Edge_Jump,  // 有跨越的边
+  Edge_Plane, // 边上的平面点
+  Wire,       // 线段 这个也许当了无效点？也就是空间中的小线段？
+  ZeroPoint   // 无效点 程序中未使用
+};
+
+// 枚举类型：位置标识
+enum Surround
+{
+  Prev, // 前一个
+  Next  // 后一个
+};
+
+// 枚举类型：表示有跨越边的类型
+enum E_jump
+{
+  Nr_nor,  // 正常
+  Nr_zero, // 0
+  Nr_180,  // 180
+  Nr_inf,  // 无穷大 跳变较远？
+  Nr_blind // 在盲区？
+};
 
 // 用于存储激光雷达点的一些其他属性
 struct orgtype
 {
-  double range;
-  double dista; 
-  double angle[2];
-  double intersect;
-  E_jump edj[2];
-  Feature ftype;
-  orgtype()
+  double range;       // 点云在xy平面离雷达中心的距离
+  double dista;       // 当前点与后一个点之间的距离 
+  //假设雷达原点为O 前一个点为M 当前点为A 后一个点为N
+  double angle[2];    // 这个是角OAM和角OAN的cos值
+  double intersect;   // 这个是角MAN的cos值
+  E_jump edj[2];      // 这个是角MAN的cos值
+  Feature ftype;      // 点类型
+  orgtype()   
   {
     range = 0;
     edj[Prev] = Nr_nor;
@@ -74,8 +98,6 @@ namespace ouster_ros {
       EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   };
 }  // namespace ouster_ros
-
-// clang-format off
 POINT_CLOUD_REGISTER_POINT_STRUCT(ouster_ros::Point,
     (float, x, x)
     (float, y, y)
@@ -104,14 +126,13 @@ class Preprocess
   void set(bool feat_en, int lid_type, double bld, int pfilt_num);
 
   // sensor_msgs::PointCloud2::ConstPtr pointcloud;
-  PointCloudXYZI pl_full, pl_corn, pl_surf;
+  PointCloudXYZI pl_full, pl_corn, pl_surf;  // 全部点、边缘点、平面点
   PointCloudXYZI pl_buff[128]; //maximum 128 line lidar
   vector<orgtype> typess[128]; //maximum 128 line lidar
-  float time_unit_scale;
-  int lidar_type, point_filter_num, N_SCANS, SCAN_RATE, time_unit;
-  double blind;
-  bool feature_enabled, given_offset_time;
-  ros::Publisher pub_full, pub_surf, pub_corn;
+  int lidar_type, point_filter_num, N_SCANS, SCAN_RATE;  // 雷达类型、采样间隔、扫描线数、扫描频率
+  double blind;  // 最小距离阈值(盲区)
+  bool feature_enabled, given_offset_time;  // 是否提取特征、是否进行时间偏移
+  ros::Publisher pub_full, pub_surf, pub_corn;  // 发布全部点、发布平面点、发布边缘点
     
 
   private:

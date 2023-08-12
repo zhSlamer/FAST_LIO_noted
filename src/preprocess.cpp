@@ -112,11 +112,12 @@ uint8 line              # laser number in lidar
 */
 void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg)
 {
-  pl_surf.clear();
-  pl_corn.clear();
-  pl_full.clear();
-  double t1 = omp_get_wtime();
-  int plsize = msg->point_num;
+  // 清除之前的点云缓存
+  pl_surf.clear();             // 清除之前的平面点云缓存
+  pl_corn.clear();             // 清除之前的角点云缓存
+  pl_full.clear();             // 清除之前的全点云缓存
+  double t1 = omp_get_wtime(); // 后面没用到
+  int plsize = msg->point_num; // 一帧中的点云总个数
   // cout<<"plsie: "<<plsize<<endl;
 
   pl_corn.reserve(plsize);
